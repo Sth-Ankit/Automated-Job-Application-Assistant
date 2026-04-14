@@ -6,10 +6,14 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
+    QDialog,
+    QDialogButtonBox,
+    QFileDialog,
     QFormLayout,
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QListWidget,
@@ -41,6 +45,7 @@ class MainWindow(QMainWindow):
     def __init__(self, context: AppContext) -> None:
         super().__init__()
         self.context = context
+        self._automation_buttons: list[QPushButton] = []
         self.setWindowTitle("LinkedIn Job Assistant")
         self.resize(1440, 900)
         self.setStatusBar(QStatusBar())
@@ -50,6 +55,8 @@ class MainWindow(QMainWindow):
 
         self.profile_list = QListWidget()
         self.profile_list.currentItemChanged.connect(self._on_profile_selected)
+        self.resume_list = QListWidget()
+        self.resume_list.currentItemChanged.connect(self._on_resume_selected)
 
         self.job_table = self._create_job_table()
         self.queue_table = self._create_job_table()
@@ -63,6 +70,7 @@ class MainWindow(QMainWindow):
         self._build_application_tab()
         self._build_recruiter_tab()
         self._build_templates_tab()
+        self._connect_automation_signals()
 
         self.refresh_all()
 
@@ -105,15 +113,16 @@ class MainWindow(QMainWindow):
         button_row = QHBoxLayout()
         save_button = QPushButton("Save Profile")
         save_button.clicked.connect(self.save_profile)
-        session_button = QPushButton("Open LinkedIn Session")
-        session_button.clicked.connect(self.open_linkedin_session)
-        search_button = QPushButton("Run Search")
-        search_button.clicked.connect(self.run_search)
+        self.session_button = QPushButton("Open LinkedIn Session")
+        self.session_button.clicked.connect(self.open_linkedin_session)
+        self.search_button = QPushButton("Run Search")
+        self.search_button.clicked.connect(self.run_search)
         refresh_button = QPushButton("Refresh")
         refresh_button.clicked.connect(self.refresh_all)
-        for button in (save_button, session_button, search_button, refresh_button):
+        for button in (save_button, self.session_button, self.search_button, refresh_button):
             button_row.addWidget(button)
         left_layout.addLayout(button_row)
+        self._register_automation_buttons(self.session_button, self.search_button)
 
         right_panel = QWidget()
         right_layout = QVBoxLayout(right_panel)
@@ -134,18 +143,19 @@ class MainWindow(QMainWindow):
         controls = QHBoxLayout()
         refresh_button = QPushButton("Refresh Queue")
         refresh_button.clicked.connect(self.refresh_jobs)
-        apply_button = QPushButton("Run Apply Cycle")
-        apply_button.clicked.connect(self.run_apply_cycle)
+        self.apply_button = QPushButton("Run Apply Cycle")
+        self.apply_button.clicked.connect(self.run_apply_cycle)
         self.apply_limit = QSpinBox()
         self.apply_limit.setRange(1, 100)
         self.apply_limit.setValue(5)
         controls.addWidget(refresh_button)
         controls.addWidget(QLabel("Max jobs"))
         controls.addWidget(self.apply_limit)
-        controls.addWidget(apply_button)
+        controls.addWidget(self.apply_button)
         controls.addStretch()
         layout.addLayout(controls)
         layout.addWidget(self.queue_table)
+        self._register_automation_buttons(self.apply_button)
 
         self.tabs.addTab(tab, "Application Queue")
 
@@ -156,18 +166,23 @@ class MainWindow(QMainWindow):
         controls = QHBoxLayout()
         refresh_button = QPushButton("Refresh Recruiters")
         refresh_button.clicked.connect(self.refresh_recruiters)
-        find_button = QPushButton("Find Recruiters")
-        find_button.clicked.connect(self.discover_recruiters)
-        draft_initial = QPushButton("Draft Initial Messages")
-        draft_initial.clicked.connect(lambda: self.draft_messages("initial"))
-        draft_follow_up = QPushButton("Draft Follow Up 1")
-        draft_follow_up.clicked.connect(lambda: self.draft_messages("follow_up_1"))
+        self.find_button = QPushButton("Find Recruiters")
+        self.find_button.clicked.connect(self.discover_recruiters)
+        self.draft_initial_button = QPushButton("Draft Initial Messages")
+        self.draft_initial_button.clicked.connect(lambda: self.draft_messages("initial"))
+        self.draft_follow_up_button = QPushButton("Draft Follow Up 1")
+        self.draft_follow_up_button.clicked.connect(lambda: self.draft_messages("follow_up_1"))
         controls.addWidget(refresh_button)
-        controls.addWidget(find_button)
-        controls.addWidget(draft_initial)
-        controls.addWidget(draft_follow_up)
+        controls.addWidget(self.find_button)
+        controls.addWidget(self.draft_initial_button)
+        controls.addWidget(self.draft_follow_up_button)
         controls.addStretch()
         layout.addLayout(controls)
+        self._register_automation_buttons(
+            self.find_button,
+            self.draft_initial_button,
+            self.draft_follow_up_button,
+        )
 
         splitter = QSplitter()
         splitter.addWidget(self.recruiter_table)
@@ -205,10 +220,17 @@ class MainWindow(QMainWindow):
         self.resume_name = QLineEdit()
         self.resume_path = QLineEdit()
         self.resume_keywords = QLineEdit()
+        resume_path_row = QHBoxLayout()
+        resume_path_row.addWidget(self.resume_path)
+        self.resume_browse_button = QPushButton("Upload Resume")
+        self.resume_browse_button.clicked.connect(self.browse_resume_file)
+        resume_path_row.addWidget(self.resume_browse_button)
         resume_save = QPushButton("Save Resume Variant")
         resume_save.clicked.connect(self.save_resume_variant)
+        resume_form.addRow(QLabel("Saved resumes"))
+        resume_form.addRow(self.resume_list)
         resume_form.addRow("Name", self.resume_name)
-        resume_form.addRow("File path", self.resume_path)
+        resume_form.addRow("Resume file", resume_path_row)
         resume_form.addRow("Keywords", self.resume_keywords)
         resume_form.addRow("", resume_save)
 
@@ -258,6 +280,7 @@ class MainWindow(QMainWindow):
         self.refresh_profiles()
         self.refresh_jobs()
         self.refresh_recruiters()
+        self.refresh_resume_variants()
         self.refresh_activity()
 
     def refresh_profiles(self) -> None:
@@ -297,6 +320,17 @@ class MainWindow(QMainWindow):
             lines.append(f"{entry.created_at} [{entry.level}] {entry.action}: {entry.message}")
         self.activity_log.setPlainText("\n".join(lines))
 
+    def refresh_resume_variants(self) -> None:
+        current_name = self.resume_name.text().strip()
+        self.resume_list.clear()
+        for variant in self.context.database.list_resume_variants():
+            item = QListWidgetItem(variant.name)
+            item.setData(Qt.ItemDataRole.UserRole, variant.id)
+            item.setToolTip(variant.file_path)
+            self.resume_list.addItem(item)
+            if variant.name == current_name:
+                self.resume_list.setCurrentItem(item)
+
     def selected_profile_id(self) -> int | None:
         item = self.profile_list.currentItem()
         if item is None:
@@ -330,70 +364,36 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"Saved profile '{profile.name}'.", 5000)
 
     def open_linkedin_session(self) -> None:
-        try:
-            self.context.runner.open_linkedin_session()
-        except Exception as exc:
-            self._error(str(exc))
-            return
-        QMessageBox.information(
-            self,
-            "Manual Login",
-            "A browser window was opened. Log into LinkedIn there, then come back and run search or apply actions.",
-        )
-        self.refresh_activity()
+        self.statusBar().showMessage("Opening LinkedIn browser session...", 5000)
+        self.context.automation_controller.open_session()
 
     def run_search(self) -> None:
         profile = self.selected_profile()
         if profile is None:
             self._error("Select or save a search profile first.")
             return
-        try:
-            count = self.context.runner.run_search(profile)
-        except Exception as exc:
-            self._error(str(exc))
-            return
-        self.refresh_jobs()
-        self.refresh_activity()
-        self.statusBar().showMessage(f"Search captured {count} jobs.", 5000)
+        self.statusBar().showMessage(f"Searching LinkedIn for '{profile.name}'...", 5000)
+        self.context.automation_controller.run_search(profile)
 
     def run_apply_cycle(self) -> None:
-        try:
-            outcomes = self.context.runner.run_apply_cycle(limit=self.apply_limit.value())
-        except Exception as exc:
-            self._error(str(exc))
-            return
-        self.refresh_jobs()
-        self.refresh_activity()
-        self.statusBar().showMessage(f"Processed {len(outcomes)} application attempts.", 5000)
+        self.statusBar().showMessage("Running application cycle...", 5000)
+        self.context.automation_controller.run_apply_cycle(self.apply_limit.value(), self.selected_profile())
 
     def discover_recruiters(self) -> None:
         profile = self.selected_profile()
         if profile is None:
             self._error("Select a profile before discovering recruiters.")
             return
-        try:
-            count = self.context.runner.discover_recruiters(profile)
-        except Exception as exc:
-            self._error(str(exc))
-            return
-        self.refresh_recruiters()
-        self.refresh_activity()
-        self.statusBar().showMessage(f"Discovered {count} recruiters.", 5000)
+        self.statusBar().showMessage("Searching LinkedIn for recruiters...", 5000)
+        self.context.automation_controller.discover_recruiters(profile)
 
     def draft_messages(self, stage: str) -> None:
         profile = self.selected_profile()
         if profile is None:
             self._error("Select a profile before drafting messages.")
             return
-        try:
-            count = self.context.runner.draft_messages(profile, stage=stage)
-        except Exception as exc:
-            self._error(str(exc))
-            return
-        self.refresh_recruiters()
-        self.refresh_activity()
-        self.show_selected_recruiter_draft()
-        self.statusBar().showMessage(f"Created {count} drafts for stage '{stage}'.", 5000)
+        self.statusBar().showMessage(f"Drafting {stage} messages...", 5000)
+        self.context.automation_controller.draft_messages(profile, stage)
 
     def save_template(self) -> None:
         template = MessageTemplate(
@@ -419,6 +419,7 @@ class MainWindow(QMainWindow):
             self._error("Resume name and file path are required.")
             return
         self.context.database.save_resume_variant(variant)
+        self.refresh_resume_variants()
         self.statusBar().showMessage(f"Saved resume variant '{variant.name}'.", 5000)
 
     def save_screening_answer(self) -> None:
@@ -485,5 +486,131 @@ class MainWindow(QMainWindow):
         index = self.profile_application_mode.findText(profile.application_mode.value)
         self.profile_application_mode.setCurrentIndex(max(index, 0))
 
+    def _on_resume_selected(self, current: QListWidgetItem | None, _: QListWidgetItem | None) -> None:
+        if current is None:
+            return
+        for variant in self.context.database.list_resume_variants():
+            if variant.id == current.data(Qt.ItemDataRole.UserRole):
+                self.resume_name.setText(variant.name)
+                self.resume_path.setText(variant.file_path)
+                self.resume_keywords.setText(", ".join(variant.keywords))
+                return
+
+    def browse_resume_file(self) -> None:
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Choose Resume File",
+            "",
+            "Resume Files (*.pdf *.doc *.docx);;All Files (*.*)",
+        )
+        if not file_path:
+            return
+        self.resume_path.setText(file_path)
+        if not self.resume_name.text().strip():
+            resume_name = file_path.replace("\\", "/").split("/")[-1].rsplit(".", 1)[0]
+            self.resume_name.setText(resume_name)
+
     def _error(self, message: str) -> None:
         QMessageBox.critical(self, "LinkedIn Job Assistant", message)
+
+    def _register_automation_buttons(self, *buttons: QPushButton) -> None:
+        self._automation_buttons.extend(buttons)
+
+    def _set_automation_busy(self, busy: bool) -> None:
+        for button in self._automation_buttons:
+            button.setEnabled(not busy)
+        if busy:
+            self.statusBar().showMessage("LinkedIn automation is running...", 0)
+        else:
+            self.statusBar().clearMessage()
+
+    def _connect_automation_signals(self) -> None:
+        controller = self.context.automation_controller
+        controller.busy_changed.connect(self._set_automation_busy)
+        controller.operation_failed.connect(self._on_operation_failed)
+        controller.session_opened.connect(self._on_session_opened)
+        controller.search_completed.connect(self._on_search_completed)
+        controller.apply_completed.connect(self._on_apply_completed)
+        controller.recruiters_discovered.connect(self._on_recruiters_discovered)
+        controller.drafts_created.connect(self._on_drafts_created)
+        controller.resume_choice_requested.connect(self._on_resume_choice_requested)
+        controller.screening_answer_requested.connect(self._on_screening_answer_requested)
+
+    def _on_operation_failed(self, message: str) -> None:
+        self.refresh_activity()
+        self._error(message)
+
+    def _on_session_opened(self) -> None:
+        self.refresh_activity()
+        QMessageBox.information(
+            self,
+            "LinkedIn Session Ready",
+            "A LinkedIn browser window has been opened in the background worker. Log in there manually and keep it open while you run search, recruiter, or apply actions.",
+        )
+        self.statusBar().showMessage("LinkedIn session opened. Complete login in the browser window.", 7000)
+
+    def _on_search_completed(self, count: int) -> None:
+        self.refresh_jobs()
+        self.refresh_activity()
+        self.statusBar().showMessage(f"Search captured {count} jobs.", 5000)
+
+    def _on_apply_completed(self, count: int, _statuses: list[str]) -> None:
+        self.refresh_jobs()
+        self.refresh_activity()
+        self.statusBar().showMessage(f"Processed {count} application attempts.", 5000)
+
+    def _on_recruiters_discovered(self, count: int) -> None:
+        self.refresh_recruiters()
+        self.refresh_activity()
+        self.statusBar().showMessage(f"Discovered {count} recruiters.", 5000)
+
+    def _on_drafts_created(self, count: int, stage: str) -> None:
+        self.refresh_recruiters()
+        self.refresh_activity()
+        self.show_selected_recruiter_draft()
+        self.statusBar().showMessage(f"Created {count} drafts for stage '{stage}'.", 5000)
+
+    def _on_resume_choice_requested(self, job_title: str, choices: list[dict[str, str]]) -> None:
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Choose Resume")
+        layout = QVBoxLayout(dialog)
+        layout.addWidget(QLabel(f"Select the resume to use for '{job_title}':"))
+        combo = QComboBox(dialog)
+        for choice in choices:
+            label = choice["name"]
+            if choice.get("keywords"):
+                label += f" ({choice['keywords']})"
+            combo.addItem(label, choice["name"])
+        layout.addWidget(combo)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self.context.automation_controller.provide_prompt_response(str(combo.currentData()))
+        else:
+            self.context.automation_controller.provide_prompt_response(None)
+
+    def _on_screening_answer_requested(self, label: str, answer_type: str, options: list[str]) -> None:
+        prompt = (
+            f"LinkedIn asked a new {answer_type} question.\n\n"
+            f"Question: {label}\n\n"
+            "Your answer will be saved and reused next time."
+        )
+        if options:
+            answer, accepted = QInputDialog.getItem(
+                self,
+                "New Screening Question",
+                prompt,
+                options,
+                0,
+                False,
+            )
+        else:
+            answer, accepted = QInputDialog.getText(
+                self,
+                "New Screening Question",
+                prompt,
+            )
+        self.context.automation_controller.provide_prompt_response(answer if accepted else None)

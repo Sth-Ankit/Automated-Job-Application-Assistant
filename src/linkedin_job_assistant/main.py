@@ -1,20 +1,14 @@
 from __future__ import annotations
 
 import sys
+from pathlib import Path
 
 from .app_context import AppContext
 from .config import AppPaths
 from .database import Database
 from .logging_utils import configure_logging
-from .models import MessageTemplate
-from .services.apply import ApplyService
-from .services.eligibility import EligibilityService
-from .services.external_apply import ExternalApplyService
-from .services.linkedin_client import LinkedInClient
-from .services.messaging import MessagingService
-from .services.recruiters import RecruiterFinderService
-from .services.runner import AutomationRunner
-from .services.search import SearchService
+from .models import MessageTemplate, ResumeVariant
+from .ui.automation_controller import AutomationController
 
 
 def build_context() -> AppContext:
@@ -24,23 +18,7 @@ def build_context() -> AppContext:
     logger = configure_logging(paths.logs_dir)
     database = Database(paths.database_path)
     database.initialize()
-
-    client = LinkedInClient()
-    search_service = SearchService(database, client)
-    eligibility_service = EligibilityService()
-    external_apply_service = ExternalApplyService()
-    apply_service = ApplyService(database, client, external_apply_service)
-    recruiter_service = RecruiterFinderService(database, client)
-    messaging_service = MessagingService()
-    runner = AutomationRunner(
-        database=database,
-        search_service=search_service,
-        eligibility_service=eligibility_service,
-        apply_service=apply_service,
-        recruiter_service=recruiter_service,
-        messaging_service=messaging_service,
-        logger=logger,
-    )
+    automation_controller = AutomationController(paths, database, logger)
 
     _seed_defaults(database)
 
@@ -48,14 +26,7 @@ def build_context() -> AppContext:
         paths=paths,
         database=database,
         logger=logger,
-        client=client,
-        search_service=search_service,
-        eligibility_service=eligibility_service,
-        external_apply_service=external_apply_service,
-        apply_service=apply_service,
-        recruiter_service=recruiter_service,
-        messaging_service=messaging_service,
-        runner=runner,
+        automation_controller=automation_controller,
     )
 
 
@@ -117,6 +88,16 @@ def _seed_defaults(database: Database) -> None:
         if template.name not in existing:
             database.save_message_template(template)
 
+    resume_path = Path(r"C:\Users\shres\OneDrive\Desktop\CurrentResume\Resume - Ankit Shrestha 2026.pdf")
+    if resume_path.exists():
+        database.save_resume_variant(
+            ResumeVariant(
+                name="Ankit Shrestha 2026",
+                file_path=str(resume_path),
+                keywords=["software engineer", "full stack", "frontend", "java", "python", "react"],
+            )
+        )
+
 
 def main() -> int:
     try:
@@ -126,14 +107,14 @@ def main() -> int:
 
     from .ui.main_window import MainWindow
 
-    context = build_context()
     app = QApplication(sys.argv)
+    context = build_context()
     window = MainWindow(context)
     window.show()
     try:
         return app.exec()
     finally:
-        context.client.stop()
+        context.automation_controller.shutdown()
 
 
 if __name__ == "__main__":

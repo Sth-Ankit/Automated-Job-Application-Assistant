@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from pathlib import Path
 from typing import Any
 from urllib.parse import quote_plus
 
@@ -9,7 +10,8 @@ class LinkedInClient:
     JOB_CARD_SELECTOR = "li.jobs-search-results__list-item, li.scaffold-layout__list-item, div.job-card-container"
     PEOPLE_CARD_SELECTOR = "li.reusable-search__result-container, div.entity-result"
 
-    def __init__(self) -> None:
+    def __init__(self, browser_profile_dir: Path | None = None) -> None:
+        self._browser_profile_dir = browser_profile_dir
         self._playwright: Any | None = None
         self._browser: Any | None = None
         self._context: Any | None = None
@@ -32,6 +34,20 @@ class LinkedInClient:
         sync_playwright, timeout_error = self._require_playwright()
         self._timeout_error = timeout_error
         self._playwright = sync_playwright().start()
+        if self._browser_profile_dir is not None:
+            try:
+                self._browser_profile_dir.mkdir(parents=True, exist_ok=True)
+                self._context = self._playwright.chromium.launch_persistent_context(
+                    user_data_dir=str(self._browser_profile_dir),
+                    headless=headless,
+                )
+                pages = self._context.pages
+                self._page = pages[0] if pages else self._context.new_page()
+                return
+            except Exception:
+                self._context = None
+                self._page = None
+
         self._browser = self._playwright.chromium.launch(headless=headless)
         self._context = self._browser.new_context()
         self._page = self._context.new_page()
@@ -52,6 +68,15 @@ class LinkedInClient:
     def page(self) -> Any:
         if self._page is None:
             raise RuntimeError("LinkedIn browser session has not been started.")
+        try:
+            if self._page.is_closed():
+                if self._context is None:
+                    raise RuntimeError("LinkedIn browser session has been closed.")
+                self._page = self._context.new_page()
+        except Exception:
+            if self._context is None:
+                raise RuntimeError("LinkedIn browser session has been closed.")
+            self._page = self._context.new_page()
         return self._page
 
     def open_login(self) -> None:

@@ -1,12 +1,20 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from ..database import Database
-from ..models import ApplicationAttempt, ExternalApplyStatus, JobRecord, JobStatus, ResumeVariant
+from ..models import (
+    ApplicationAttempt,
+    ExternalApplyStatus,
+    JobRecord,
+    JobStatus,
+    ResumeVariant,
+    ScreeningAnswer,
+)
 from .external_apply import ExternalApplyService
 from .linkedin_client import LinkedInClient
 
@@ -24,10 +32,14 @@ class ApplyService:
         database: Database,
         client: LinkedInClient,
         external_apply_service: ExternalApplyService,
+        resume_choice_callback: Callable[[JobRecord, list[ResumeVariant]], str | None] | None = None,
+        screening_answer_callback: Callable[[str, str, list[str]], str | None] | None = None,
     ) -> None:
         self.database = database
         self.client = client
         self.external_apply_service = external_apply_service
+        self.resume_choice_callback = resume_choice_callback
+        self.screening_answer_callback = screening_answer_callback
 
     def apply_to_job(self, job: JobRecord) -> ApplyOutcome:
         if job.easy_apply_available:
@@ -103,7 +115,7 @@ class ApplyService:
             if input_type in {"hidden", "file", "checkbox", "radio"}:
                 continue
             label = self._infer_field_label(input_locator)
-            answer = self._match_answer(label)
+            answer = self._resolve_answer(label, "text", [])
             if answer is None and self._is_required(input_locator):
                 return f"Missing screening answer for: {label}"
             if answer is not None:
@@ -112,7 +124,8 @@ class ApplyService:
         selects = page.locator("div[role='dialog'] select").all()
         for select_locator in selects:
             label = self._infer_field_label(select_locator)
-            answer = self._match_answer(label)
+            options = self._extract_select_options(select_locator)
+            answer = self._resolve_answer(label, "select", options)
             if answer is None:
                 if self._is_required(select_locator):
                     return f"Missing selection answer for: {label}"
@@ -128,7 +141,8 @@ class ApplyService:
         radio_groups = page.locator("fieldset[data-test-form-builder-radio-button-form-component='true']").all()
         for group in radio_groups:
             group_label = self._infer_group_label(group)
-            answer = self._match_answer(group_label)
+            options = self._extract_radio_options(group)
+            answer = self._resolve_answer(group_label, "radio", options)
             if answer is None:
                 return f"Missing radio answer for: {group_label}"
             option = group.locator(f"label:has-text('{answer}')").first
@@ -155,13 +169,45 @@ class ApplyService:
         variants = self.database.list_resume_variants()
         if not variants:
             return None
+        if len(variants) == 1:
+            return variants[0]
         searchable_text = f"{job.title} {job.company} {job.location} {job.raw_metadata}"
         scored: list[tuple[int, ResumeVariant]] = []
         for variant in variants:
             score = sum(1 for keyword in variant.keywords if keyword.lower() in searchable_text.lower())
             scored.append((score, variant))
         scored.sort(key=lambda item: item[0], reverse=True)
-        return scored[0][1]
+        best_score = scored[0][0]
+        top_variants = [variant for score, variant in scored if score == best_score]
+        if len(top_variants) == 1:
+            return top_variants[0]
+        if self.resume_choice_callback is None:
+            return top_variants[0]
+        selected_name = self.resume_choice_callback(job, top_variants)
+        if not selected_name:
+            return None
+        for variant in variants:
+            if variant.name == selected_name or variant.file_path == selected_name:
+                return variant
+        return None
+
+    def _resolve_answer(self, label: str, answer_type: str, options: list[str]) -> str | None:
+        answer = self._match_answer(label)
+        if answer is not None:
+            return answer
+        if self.screening_answer_callback is None:
+            return None
+        provided = self.screening_answer_callback(label, answer_type, options)
+        if not provided:
+            return None
+        self.database.save_screening_answer(
+            ScreeningAnswer(
+                question_pattern=label,
+                answer_type=answer_type,
+                answer_value=provided,
+            )
+        )
+        return provided
 
     def _match_answer(self, label: str) -> str | None:
         normalized_label = label.lower()
@@ -169,8 +215,13 @@ class ApplyService:
             pattern = answer.question_pattern.strip().lower()
             if not pattern:
                 continue
-            if pattern in normalized_label or re.search(pattern, normalized_label):
+            if pattern in normalized_label:
                 return answer.answer_value
+            try:
+                if re.search(pattern, normalized_label):
+                    return answer.answer_value
+            except re.error:
+                continue
         return None
 
     @staticmethod
@@ -232,3 +283,27 @@ class ApplyService:
             return locator.get_attribute("required") is not None or locator.get_attribute("aria-required") == "true"
         except Exception:
             return False
+
+    @staticmethod
+    def _extract_select_options(select_locator: Any) -> list[str]:
+        options: list[str] = []
+        try:
+            for option in select_locator.locator("option").all():
+                text = (option.text_content() or "").strip()
+                if text and text.lower() not in {"select an option", "choose an option"}:
+                    options.append(text)
+        except Exception:
+            return []
+        return options
+
+    @staticmethod
+    def _extract_radio_options(group: Any) -> list[str]:
+        options: list[str] = []
+        try:
+            for option in group.locator("label").all():
+                text = " ".join((option.text_content() or "").split())
+                if text:
+                    options.append(text)
+        except Exception:
+            return []
+        return options
